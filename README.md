@@ -6,7 +6,7 @@ A multi-user drawing application where multiple people can draw simultaneously o
 ![Socket.IO](https://img.shields.io/badge/Socket.IO-4.7-blue.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-## 🎯 Overview
+## Overview
 
 This project implements a real-time collaborative drawing canvas that allows multiple users to:
 - Draw simultaneously on a shared canvas
@@ -14,7 +14,7 @@ This project implements a real-time collaborative drawing canvas that allows mul
 - Undo/redo their own drawing actions
 - Clear only their own drawings without affecting others
 
-## 🏗️ Architecture
+## Architecture
 
 ### Core Principles
 
