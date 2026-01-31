@@ -91,17 +91,17 @@ Newer strokes render on top of older ones
 Each user can only undo/clear their own strokes
 
 ### Project Structure
-collaborative-canvas/
-├── client/
-│   ├── index.html      # Main HTML structure
-│   ├── style.css       # Styling
-│   └── main.js         # Application entry point, UI logic
-├── server/
-│   └── server.js       # Express + Socket.IO server
-├── package.json
-├── Procfile            # For Heroku/Railway deployment
-├── README.md
-└── ARCHITECTURE.md
+    collaborative-canvas/
+    ├── client/
+    │   ├── index.html      # Main HTML structure
+    │   ├── style.css       # Styling
+    │   └── main.js         # Application entry point, UI logic
+    ├── server/
+    │   └── server.js       # Express + Socket.IO server
+    ├── package.json
+    ├── Procfile            # For Heroku/Railway deployment
+    ├── README.md
+    └── ARCHITECTURE.md
 
 ### Setup
 
