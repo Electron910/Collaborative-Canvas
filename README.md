@@ -106,8 +106,9 @@ Each user can only undo/clear their own strokes
 ### Setup
 
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/collaborative-canvas.git
-cd collaborative-canvas
+git clone [https://github.com/Electron/collaborative-canvas.git](https://github.com/Electron910/Collaborative-Canvas.git)
+
+- cd collaborative-canvas
 
 # Install dependencies
 npm install
