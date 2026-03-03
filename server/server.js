@@ -2,15 +2,14 @@ var express = require('express');
 var http = require('http');
 var socketIo = require('socket.io');
 var path = require('path');
+var RoomManager = require('./rooms');
+var StateManager = require('./state-manager');
 
 var app = express();
 var server = http.createServer(app);
 var io = socketIo(server, {
     cors: {
-        origin: [
-            "https://collaborative-canvas-ruddy.vercel.app/",
-            "http://localhost:3000"
-        ],
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
@@ -19,31 +18,19 @@ var PORT = process.env.PORT || 3000;
 
 app.use(express.static(path.join(__dirname, '../client')));
 
-var rooms = {};
+var roomManager = new RoomManager();
+var stateManager = new StateManager();
 
 var userColors = [
     '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6',
     '#1abc9c', '#e91e63', '#00bcd4', '#ff5722', '#607d8b'
 ];
 
-function getRoom(roomId) {
-    if (!rooms[roomId]) {
-        rooms[roomId] = {
-            users: {},
-            history: [],
-            activeStrokes: {},
-            orderCounter: 0
-        };
-    }
-    return rooms[roomId];
-}
-
-function assignColor(roomId) {
-    var room = getRoom(roomId);
+function assignUserColor(roomId) {
+    var usersInRoom = roomManager.getUsersInRoom(roomId);
     var usedColors = [];
-    var userIds = Object.keys(room.users);
-    for (var i = 0; i < userIds.length; i++) {
-        usedColors.push(room.users[userIds[i]].color);
+    for (var i = 0; i < usersInRoom.length; i++) {
+        usedColors.push(usersInRoom[i].color);
     }
     for (var j = 0; j < userColors.length; j++) {
         if (usedColors.indexOf(userColors[j]) === -1) {
@@ -53,32 +40,8 @@ function assignColor(roomId) {
     return userColors[Math.floor(Math.random() * userColors.length)];
 }
 
-function getUserList(roomId) {
-    var room = getRoom(roomId);
-    var list = [];
-    var ids = Object.keys(room.users);
-    for (var i = 0; i < ids.length; i++) {
-        list.push(room.users[ids[i]]);
-    }
-    return list;
-}
-
-function getVisibleHistory(roomId) {
-    var room = getRoom(roomId);
-    var visible = [];
-    for (var i = 0; i < room.history.length; i++) {
-        if (!room.history[i].undone) {
-            visible.push(room.history[i]);
-        }
-    }
-    visible.sort(function(a, b) {
-        return a.order - b.order;
-    });
-    return visible;
-}
-
 io.on('connection', function(socket) {
-    console.log('Connected:', socket.id);
+    console.log('User connected:', socket.id);
     
     var currentRoom = null;
     var userData = null;
@@ -88,217 +51,217 @@ io.on('connection', function(socket) {
         var username = data.username || 'User_' + socket.id.slice(0, 4);
         
         currentRoom = roomId;
-        var room = getRoom(roomId);
         
-        var color = assignColor(roomId);
+        var color = assignUserColor(currentRoom);
         userData = {
             id: socket.id,
             username: username,
-            color: color
+            color: color,
+            cursor: { x: 0, y: 0 },
+            isDrawing: false
         };
+
+        socket.join(currentRoom);
+        roomManager.addUserToRoom(currentRoom, userData);
+        stateManager.initializeRoom(currentRoom);
+
+        var historyData = stateManager.getHistory(currentRoom);
         
-        room.users[socket.id] = userData;
-        socket.join(roomId);
-        
-        console.log(username, 'joined room', roomId);
+        console.log('User joined:', username, 'ID:', socket.id, 'Room:', roomId);
+        console.log('Current history length:', historyData.length);
         
         socket.emit('room_joined', {
-            roomId: roomId,
-            userId: socket.id,
+            roomId: currentRoom,
+            odId: socket.id,
             user: userData,
-            users: getUserList(roomId)
+            users: roomManager.getUsersInRoom(currentRoom),
+            drawingHistory: historyData
         });
-        
-        socket.emit('sync_history', {
-            history: getVisibleHistory(roomId)
-        });
-        
-        socket.to(roomId).emit('user_joined', {
+
+        socket.to(currentRoom).emit('user_joined', {
             user: userData,
-            users: getUserList(roomId)
+            users: roomManager.getUsersInRoom(currentRoom)
         });
     });
 
-    socket.on('draw_start', function(data) {
+    socket.on('drawing_start', function(data) {
         if (!currentRoom || !userData) return;
         
-        var room = getRoom(currentRoom);
-        room.orderCounter++;
+        userData.isDrawing = true;
+        roomManager.updateUserDrawingState(currentRoom, socket.id, true);
         
-        var stroke = {
+        var zIndex = stateManager.getNextZIndex(currentRoom);
+        
+        var strokeData = {
             id: data.strokeId,
             odId: socket.id,
             username: userData.username,
-            color: data.color,
-            width: data.width,
-            tool: data.tool || 'brush',
-            points: [{ x: data.x, y: data.y }],
-            order: room.orderCounter,
-            undone: false,
-            timestamp: Date.now()
+            userColor: userData.color,
+            points: [data.point],
+            style: data.style,
+            tool: data.tool,
+            timestamp: Date.now(),
+            zIndex: zIndex
         };
+
+        console.log('Stroke started:', data.strokeId, 'by user:', socket.id);
         
-        room.activeStrokes[data.strokeId] = stroke;
+        stateManager.startStroke(currentRoom, strokeData);
         
-        console.log('draw_start:', data.strokeId, 'by', userData.username);
+        socket.to(currentRoom).emit('drawing_start', strokeData);
         
-        socket.to(currentRoom).emit('draw_start', {
-            strokeId: stroke.id,
-            odId: stroke.odId,
-            username: stroke.username,
-            x: data.x,
-            y: data.y,
-            color: stroke.color,
-            width: stroke.width,
-            tool: stroke.tool,
-            order: stroke.order
+        socket.to(currentRoom).emit('user_drawing_state', {
+            odId: socket.id,
+            username: userData.username,
+            color: userData.color,
+            isDrawing: true,
+            position: data.point
         });
     });
 
-    socket.on('draw_move', function(data) {
+    socket.on('drawing_move', function(data) {
         if (!currentRoom || !userData) return;
         
-        var room = getRoom(currentRoom);
-        var stroke = room.activeStrokes[data.strokeId];
+        stateManager.addPointToStroke(currentRoom, data.strokeId, data.point);
         
-        if (stroke) {
-            stroke.points.push({ x: data.x, y: data.y });
-            
-            socket.to(currentRoom).emit('draw_move', {
-                strokeId: data.strokeId,
-                x: data.x,
-                y: data.y,
-                odId: socket.id
-            });
-        }
+        socket.to(currentRoom).emit('drawing_move', {
+            strokeId: data.strokeId,
+            point: data.point,
+            odId: socket.id
+        });
     });
 
-    socket.on('draw_end', function(data) {
+    socket.on('drawing_end', function(data) {
         if (!currentRoom || !userData) return;
         
-        var room = getRoom(currentRoom);
-        var stroke = room.activeStrokes[data.strokeId];
+        userData.isDrawing = false;
+        roomManager.updateUserDrawingState(currentRoom, socket.id, false);
         
-        if (stroke) {
-            delete room.activeStrokes[data.strokeId];
-            room.history.push(stroke);
-            
-            console.log('draw_end:', data.strokeId, '- History size:', room.history.length);
-            
-            socket.to(currentRoom).emit('draw_end', {
-                strokeId: data.strokeId,
-                odId: socket.id
-            });
-        }
-    });
-
-    socket.on('undo', function() {
-        if (!currentRoom || !userData) return;
+        var finishedStroke = stateManager.finishStroke(currentRoom, data.strokeId);
         
-        var room = getRoom(currentRoom);
-        
-        var lastStrokeIndex = -1;
-        for (var i = room.history.length - 1; i >= 0; i--) {
-            if (room.history[i].odId === socket.id && !room.history[i].undone) {
-                lastStrokeIndex = i;
-                break;
-            }
+        console.log('Stroke ended:', data.strokeId, 'by user:', socket.id);
+        if (finishedStroke) {
+            console.log('Stroke saved with odId:', finishedStroke.odId);
         }
         
-        if (lastStrokeIndex >= 0) {
-            room.history[lastStrokeIndex].undone = true;
-            console.log('Undo by', userData.username, '- stroke:', room.history[lastStrokeIndex].id);
-            
-            io.to(currentRoom).emit('sync_history', {
-                history: getVisibleHistory(currentRoom),
-                action: 'undo',
-                byUser: userData.username
-            });
-        }
-    });
-
-    socket.on('redo', function() {
-        if (!currentRoom || !userData) return;
+        socket.to(currentRoom).emit('drawing_end', {
+            strokeId: data.strokeId,
+            odId: socket.id
+        });
         
-        var room = getRoom(currentRoom);
-        
-        var firstUndoneIndex = -1;
-        for (var i = 0; i < room.history.length; i++) {
-            if (room.history[i].odId === socket.id && room.history[i].undone) {
-                firstUndoneIndex = i;
-                break;
-            }
-        }
-        
-        if (firstUndoneIndex >= 0) {
-            room.history[firstUndoneIndex].undone = false;
-            console.log('Redo by', userData.username);
-            
-            io.to(currentRoom).emit('sync_history', {
-                history: getVisibleHistory(currentRoom),
-                action: 'redo',
-                byUser: userData.username
-            });
-        }
-    });
-
-    socket.on('clear_mine', function() {
-        if (!currentRoom || !userData) return;
-        
-        var room = getRoom(currentRoom);
-        var count = 0;
-        
-        for (var i = 0; i < room.history.length; i++) {
-            if (room.history[i].odId === socket.id && !room.history[i].undone) {
-                room.history[i].undone = true;
-                count++;
-            }
-        }
-        
-        console.log('Clear by', userData.username, '-', count, 'strokes');
-        
-        io.to(currentRoom).emit('sync_history', {
-            history: getVisibleHistory(currentRoom),
-            action: 'clear',
-            byUser: userData.username,
-            count: count
+        socket.to(currentRoom).emit('user_drawing_state', {
+            odId: socket.id,
+            username: userData.username,
+            color: userData.color,
+            isDrawing: false,
+            position: null
         });
     });
 
     socket.on('cursor_move', function(data) {
         if (!currentRoom || !userData) return;
         
+        userData.cursor = data.position;
+        roomManager.updateUserCursor(currentRoom, socket.id, data.position);
+        
         socket.to(currentRoom).emit('cursor_update', {
             odId: socket.id,
             username: userData.username,
             color: userData.color,
-            x: data.x,
-            y: data.y
+            position: data.position,
+            isDrawing: userData.isDrawing
+        });
+    });
+
+    socket.on('undo_request', function() {
+        if (!currentRoom || !userData) return;
+        
+        console.log('Undo requested by:', socket.id, userData.username);
+        
+        var undoneStroke = stateManager.undoForUser(currentRoom, socket.id);
+        
+        if (undoneStroke) {
+            console.log('Undone stroke:', undoneStroke.id);
+            var newHistory = stateManager.getHistory(currentRoom);
+            
+            io.to(currentRoom).emit('history_update', {
+                history: newHistory,
+                action: 'undo',
+                odId: socket.id,
+                username: userData.username
+            });
+        } else {
+            console.log('No strokes to undo for user:', socket.id);
+        }
+    });
+
+    socket.on('redo_request', function() {
+        if (!currentRoom || !userData) return;
+        
+        console.log('Redo requested by:', socket.id, userData.username);
+        
+        var redoneStroke = stateManager.redoForUser(currentRoom, socket.id);
+        
+        if (redoneStroke) {
+            console.log('Redone stroke:', redoneStroke.id);
+            var newHistory = stateManager.getHistory(currentRoom);
+            
+            io.to(currentRoom).emit('history_update', {
+                history: newHistory,
+                action: 'redo',
+                odId: socket.id,
+                username: userData.username
+            });
+        } else {
+            console.log('No strokes to redo for user:', socket.id);
+        }
+    });
+
+    socket.on('clear_my_drawings', function() {
+        if (!currentRoom || !userData) return;
+        
+        console.log('');
+        console.log('========================================');
+        console.log('CLEAR MY DRAWINGS REQUEST');
+        console.log('User ID:', socket.id);
+        console.log('Username:', userData.username);
+        console.log('========================================');
+        
+        var result = stateManager.clearUserDrawings(currentRoom, socket.id);
+        
+        console.log('Removed count:', result.removedCount);
+        console.log('Remaining history:', result.history.length);
+        console.log('========================================');
+        console.log('');
+        
+        io.to(currentRoom).emit('history_update', {
+            history: result.history,
+            action: 'clear',
+            odId: socket.id,
+            username: userData.username,
+            removedCount: result.removedCount
         });
     });
 
     socket.on('disconnect', function() {
-        console.log('Disconnected:', socket.id);
+        console.log('User disconnected:', socket.id);
         
         if (currentRoom && userData) {
-            var room = getRoom(currentRoom);
-            delete room.users[socket.id];
-            delete room.activeStrokes[socket.id];
+            roomManager.removeUserFromRoom(currentRoom, socket.id);
             
             socket.to(currentRoom).emit('user_left', {
                 odId: socket.id,
                 username: userData.username,
-                users: getUserList(currentRoom)
+                users: roomManager.getUsersInRoom(currentRoom)
             });
-            
-            if (Object.keys(room.users).length === 0) {
-                delete rooms[currentRoom];
-                console.log('Room deleted:', currentRoom);
-            }
         }
     });
 });
 
 server.listen(PORT, function() {
-    console.log('Server: http://localhost:' + PORT);
+    console.log('');
+    console.log('========================================');
+    console.log('Server running on http://localhost:' + PORT);
+    console.log('========================================');
+    console.log('');
 });

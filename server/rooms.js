@@ -1,3 +1,4 @@
+
 function RoomManager() {
     this.rooms = {};
 }
