@@ -1,23 +1,29 @@
 (function() {
-    var canvas = null;
-    var ws = null;
+    
+    var currentTool = 'brush';
+    var currentColor = '#000000';
+    var currentWidth = 5;
+    var isDrawing = false;
+    var currentStrokeId = null;
+    var strokeCounter = 0;
+    var lastX = 0;
+    var lastY = 0;
+    
     var users = [];
     var myUser = null;
-    var myUserId = null;
-    var drawingStates = {};
-
+    
     var joinModal, mainContainer, usernameInput, roomInput, joinBtn;
     var toolButtons, colorButtons, customColorInput;
     var strokeWidthInput, strokeWidthValue, strokePreview;
     var undoBtn, redoBtn, clearBtn;
-    var usersList, currentRoomSpan, yourColorSpan, yourIdSpan, notificationArea;
-
+    var usersList, currentRoomSpan, yourColorSpan, notifications;
+    
     function init() {
         cacheDOM();
-        bindEvents();
-        updateStrokePreview(5, '#000000');
+        bindUI();
+        updateStrokePreview();
     }
-
+    
     function cacheDOM() {
         joinModal = document.getElementById('join-modal');
         mainContainer = document.getElementById('main-container');
@@ -39,18 +45,13 @@
         usersList = document.getElementById('users-list');
         currentRoomSpan = document.getElementById('current-room');
         yourColorSpan = document.getElementById('your-color');
-        yourIdSpan = document.getElementById('your-id');
-        notificationArea = document.getElementById('notification-area');
+        notifications = document.getElementById('notifications');
     }
-
-    function bindEvents() {
+    
+    function bindUI() {
         joinBtn.addEventListener('click', joinRoom);
-        usernameInput.addEventListener('keypress', function(e) { 
-            if (e.key === 'Enter') joinRoom(); 
-        });
-        roomInput.addEventListener('keypress', function(e) { 
-            if (e.key === 'Enter') joinRoom(); 
-        });
+        usernameInput.addEventListener('keypress', function(e) { if (e.key === 'Enter') joinRoom(); });
+        roomInput.addEventListener('keypress', function(e) { if (e.key === 'Enter') joinRoom(); });
         
         for (var i = 0; i < toolButtons.length; i++) {
             (function(btn) {
@@ -64,282 +65,239 @@
             })(colorButtons[j]);
         }
         
-        customColorInput.addEventListener('input', function(e) { 
-            setCustomColor(e.target.value); 
-        });
-        strokeWidthInput.addEventListener('input', function(e) { 
-            setStrokeWidth(parseInt(e.target.value, 10)); 
+        customColorInput.addEventListener('input', function(e) {
+            currentColor = e.target.value;
+            clearActiveColorBtn();
+            updateStrokePreview();
         });
         
-        undoBtn.addEventListener('click', doUndo);
-        redoBtn.addEventListener('click', doRedo);
-        clearBtn.addEventListener('click', doClear);
+        strokeWidthInput.addEventListener('input', function(e) {
+            currentWidth = parseInt(e.target.value, 10);
+            strokeWidthValue.textContent = currentWidth + 'px';
+            updateStrokePreview();
+        });
         
-        document.addEventListener('keydown', handleKeys);
+        undoBtn.addEventListener('click', function() { Network.sendUndo(); });
+        redoBtn.addEventListener('click', function() { Network.sendRedo(); });
+        clearBtn.addEventListener('click', function() {
+            if (confirm('Clear all your drawings?')) {
+                Network.sendClearMine();
+            }
+        });
+        
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+                e.preventDefault();
+                if (e.shiftKey) {
+                    Network.sendRedo();
+                } else {
+                    Network.sendUndo();
+                }
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+                e.preventDefault();
+                Network.sendRedo();
+            }
+        });
     }
-
+    
     function joinRoom() {
-        var username = usernameInput.value.trim();
-        var roomId = roomInput.value.trim();
+        var username = usernameInput.value.trim() || 'User_' + Math.random().toString(36).substr(2, 5);
+        var roomId = roomInput.value.trim() || 'default';
         
-        if (!username) {
-            username = 'User_' + Math.random().toString(36).substr(2, 5);
-        }
-        if (!roomId) {
-            roomId = 'default';
-        }
+        setupNetwork();
         
-        ws = new WebSocketManager();
-        setupWSHandlers();
-        
-        ws.connect().then(function() {
+        Network.connect().then(function() {
             joinModal.classList.add('hidden');
             mainContainer.classList.remove('hidden');
             
             setTimeout(function() {
-                canvas = new CanvasManager('drawing-canvas', 'cursor-canvas');
-                setupCanvasHandlers();
-                ws.joinRoom(roomId, username);
-            }, 100);
+                Renderer.init('main-canvas', 'cursor-canvas');
+                Renderer.startCursorLoop();
+                
+                DrawingState.onChange(function() {
+                    Renderer.render();
+                });
+                
+                bindCanvas();
+                Network.joinRoom(roomId, username);
+            }, 50);
         }).catch(function(err) {
-            console.error('Failed to connect:', err);
             notify('Connection failed', 'warning');
         });
     }
-
-    function setupWSHandlers() {
-        ws.on('onConnect', function() {
-            console.log('Connected to server');
-        });
-
-        ws.on('onDisconnect', function(reason) {
-            console.log('Disconnected:', reason);
-            notify('Disconnected from server', 'warning');
-        });
-
-        ws.on('onRoomJoined', function(data) {
+    
+    function setupNetwork() {
+        Network.on('onRoomJoined', function(data) {
             myUser = data.user;
-            myUserId = data.odId;
             users = data.users;
-            
-            console.log('=== Room Joined ===');
-            console.log('My User ID:', myUserId);
-            console.log('My Username:', data.user.username);
-            console.log('Room:', data.roomId);
-            console.log('History length:', data.drawingHistory ? data.drawingHistory.length : 0);
             
             currentRoomSpan.textContent = data.roomId;
             yourColorSpan.style.backgroundColor = data.user.color;
-            yourIdSpan.textContent = myUserId;
-            
-            if (canvas) {
-                canvas.setMyInfo(myUserId, data.user.username, data.user.color);
-                if (data.drawingHistory && data.drawingHistory.length > 0) {
-                    canvas.setFullHistory(data.drawingHistory);
-                }
-            }
             
             renderUsers();
             notify('Joined room: ' + data.roomId, 'success');
         });
-
-        ws.on('onUserJoined', function(data) {
+        
+        Network.on('onSyncHistory', function(data) {
+            DrawingState.setHistory(data.history);
+            
+            if (data.action === 'undo') {
+                notify(data.byUser + ' undid a stroke', 'info');
+            } else if (data.action === 'redo') {
+                notify(data.byUser + ' redid a stroke', 'info');
+            } else if (data.action === 'clear') {
+                notify(data.byUser + ' cleared their drawings', 'info');
+            }
+        });
+        
+        Network.on('onUserJoined', function(data) {
             users = data.users;
             renderUsers();
             notify(data.user.username + ' joined', 'info');
         });
-
-        ws.on('onUserLeft', function(data) {
+        
+        Network.on('onUserLeft', function(data) {
             users = data.users;
-            delete drawingStates[data.odId];
+            DrawingState.removeCursor(data.odId);
             renderUsers();
-            if (canvas) {
-                canvas.removeCursor(data.odId);
-            }
             notify(data.username + ' left', 'info');
         });
-
-        ws.on('onDrawingStart', function(data) {
-            if (canvas) {
-                canvas.onRemoteDrawStart(data);
-            }
-            drawingStates[data.odId] = true;
-            renderUsers();
+        
+        Network.on('onDrawStart', function(data) {
+            DrawingState.startStroke({
+                id: data.strokeId,
+                odId: data.odId,
+                username: data.username,
+                color: data.color,
+                width: data.width,
+                tool: data.tool,
+                x: data.x,
+                y: data.y,
+                order: data.order
+            });
         });
-
-        ws.on('onDrawingMove', function(data) {
-            if (canvas) {
-                canvas.onRemoteDrawMove(data);
-            }
+        
+        Network.on('onDrawMove', function(data) {
+            DrawingState.addPoint(data.strokeId, data.x, data.y);
         });
-
-        ws.on('onDrawingEnd', function(data) {
-            if (canvas) {
-                canvas.onRemoteDrawEnd(data);
-            }
-            drawingStates[data.odId] = false;
-            renderUsers();
+        
+        Network.on('onDrawEnd', function(data) {
+            DrawingState.endStroke(data.strokeId);
         });
-
-        ws.on('onCursorUpdate', function(data) {
-            if (canvas) {
-                canvas.updateCursor(data.odId, data);
-            }
-        });
-
-        ws.on('onUserDrawingState', function(data) {
-            drawingStates[data.odId] = data.isDrawing;
-            if (canvas && data.isDrawing && data.position) {
-                canvas.remoteDrawingStates[data.odId] = {
-                    username: data.username,
-                    color: data.color,
-                    isDrawing: true,
-                    position: data.position
-                };
-            } else if (canvas && !data.isDrawing) {
-                if (canvas.remoteDrawingStates[data.odId]) {
-                    canvas.remoteDrawingStates[data.odId].isDrawing = false;
-                }
-            }
-            renderUsers();
-        });
-
-        ws.on('onHistoryUpdate', function(data) {
-            console.log('=== History Update ===');
-            console.log('Action:', data.action);
-            console.log('By:', data.username);
-            console.log('New history length:', data.history.length);
-            
-            if (canvas) {
-                canvas.setFullHistory(data.history);
-            }
-            
-            if (data.action === 'undo') {
-                notify(data.username + ' undid a stroke', 'info');
-            } else if (data.action === 'redo') {
-                notify(data.username + ' redid a stroke', 'info');
-            } else if (data.action === 'clear') {
-                if (data.odId === myUserId) {
-                    notify('Your drawings have been cleared (' + data.removedCount + ' strokes)', 'success');
-                } else {
-                    notify(data.username + ' cleared their drawings', 'info');
-                }
-            }
-        });
-
-        ws.on('onError', function(err) {
-            console.error('WebSocket error:', err);
-            notify('Connection error', 'warning');
+        
+        Network.on('onCursorUpdate', function(data) {
+            DrawingState.updateCursor(data.odId, data);
         });
     }
-
-    function setupCanvasHandlers() {
-        canvas.onDrawStart = function(data) {
-            ws.sendDrawStart(data);
-        };
-
-        canvas.onDrawMove = function(data) {
-            ws.sendDrawMove(data);
-        };
-
-        canvas.onDrawEnd = function(data) {
-            ws.sendDrawEnd(data);
-        };
-
-        canvas.onCursorMove = function(position) {
-            ws.sendCursorMove(position);
-        };
+    
+    function bindCanvas() {
+        var canvas = Renderer.getCanvas();
+        
+        canvas.addEventListener('mousedown', onPointerDown);
+        canvas.addEventListener('mousemove', onPointerMove);
+        canvas.addEventListener('mouseup', onPointerUp);
+        canvas.addEventListener('mouseleave', onPointerUp);
+        
+        canvas.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            if (e.touches.length === 1) onPointerDown(e);
+        }, { passive: false });
+        
+        canvas.addEventListener('touchmove', function(e) {
+            e.preventDefault();
+            if (e.touches.length === 1) onPointerMove(e);
+        }, { passive: false });
+        
+        canvas.addEventListener('touchend', function(e) {
+            e.preventDefault();
+            onPointerUp(e);
+        }, { passive: false });
     }
-
+    
+    function generateStrokeId() {
+        strokeCounter++;
+        return 'stroke_' + Network.getMyUserId() + '_' + Date.now() + '_' + strokeCounter;
+    }
+    
+    function onPointerDown(e) {
+        var coords = Renderer.getCoords(e);
+        
+        isDrawing = true;
+        currentStrokeId = generateStrokeId();
+        lastX = coords.x;
+        lastY = coords.y;
+        
+        var drawColor = currentTool === 'eraser' ? '#FFFFFF' : currentColor;
+        
+        Network.sendDrawStart(currentStrokeId, coords.x, coords.y, drawColor, currentWidth, currentTool);
+        
+        DrawingState.startStroke({
+            id: currentStrokeId,
+            odId: Network.getMyUserId(),
+            username: myUser ? myUser.username : '',
+            color: drawColor,
+            width: currentWidth,
+            tool: currentTool,
+            x: coords.x,
+            y: coords.y,
+            order: Date.now()
+        });
+    }
+    
+    function onPointerMove(e) {
+        var coords = Renderer.getCoords(e);
+        
+        Network.sendCursorMove(coords.x, coords.y);
+        
+        if (!isDrawing) return;
+        
+        Network.sendDrawMove(currentStrokeId, coords.x, coords.y);
+        DrawingState.addPoint(currentStrokeId, coords.x, coords.y);
+        
+        lastX = coords.x;
+        lastY = coords.y;
+    }
+    
+    function onPointerUp(e) {
+        if (!isDrawing) return;
+        
+        isDrawing = false;
+        
+        Network.sendDrawEnd(currentStrokeId);
+        DrawingState.endStroke(currentStrokeId);
+        
+        currentStrokeId = null;
+    }
+    
     function selectTool(btn) {
         for (var i = 0; i < toolButtons.length; i++) {
             toolButtons[i].classList.remove('active');
         }
         btn.classList.add('active');
-        
-        var tool = btn.getAttribute('data-tool');
-        if (canvas) {
-            canvas.setTool(tool);
-        }
+        currentTool = btn.getAttribute('data-tool');
     }
-
+    
     function selectColor(btn) {
-        for (var i = 0; i < colorButtons.length; i++) {
-            colorButtons[i].classList.remove('active');
-        }
+        clearActiveColorBtn();
         btn.classList.add('active');
-        
-        var color = btn.getAttribute('data-color');
-        if (canvas) {
-            canvas.setColor(color);
-        }
-        customColorInput.value = color;
-        updateStrokePreview(parseInt(strokeWidthInput.value, 10), color);
+        currentColor = btn.getAttribute('data-color');
+        customColorInput.value = currentColor;
+        updateStrokePreview();
     }
-
-    function setCustomColor(color) {
+    
+    function clearActiveColorBtn() {
         for (var i = 0; i < colorButtons.length; i++) {
             colorButtons[i].classList.remove('active');
         }
-        if (canvas) {
-            canvas.setColor(color);
-        }
-        updateStrokePreview(parseInt(strokeWidthInput.value, 10), color);
     }
-
-    function setStrokeWidth(width) {
-        strokeWidthValue.textContent = width + 'px';
-        if (canvas) {
-            canvas.setStrokeWidth(width);
-        }
-        var currentColor = canvas ? canvas.color : '#000000';
-        updateStrokePreview(width, currentColor);
+    
+    function updateStrokePreview() {
+        strokePreview.style.width = currentWidth + 'px';
+        strokePreview.style.height = currentWidth + 'px';
+        strokePreview.style.backgroundColor = currentColor;
     }
-
-    function updateStrokePreview(width, color) {
-        strokePreview.style.width = width + 'px';
-        strokePreview.style.height = width + 'px';
-        strokePreview.style.backgroundColor = color || '#000000';
-    }
-
-    function doUndo() {
-        if (ws) {
-            ws.sendUndo();
-        }
-    }
-
-    function doRedo() {
-        if (ws) {
-            ws.sendRedo();
-        }
-    }
-
-    function doClear() {
-        var confirmed = confirm('Clear all your drawings? Other users\' drawings will remain.');
-        if (confirmed && ws) {
-            console.log('Requesting to clear my drawings...');
-            ws.sendClearMyDrawings();
-        }
-    }
-
-    function handleKeys(e) {
-        var isCtrl = e.ctrlKey || e.metaKey;
-        
-        if (isCtrl && e.key.toLowerCase() === 'z') {
-            e.preventDefault();
-            if (e.shiftKey) {
-                doRedo();
-            } else {
-                doUndo();
-            }
-        }
-        
-        if (isCtrl && e.key.toLowerCase() === 'y') {
-            e.preventDefault();
-            doRedo();
-        }
-    }
-
+    
     function renderUsers() {
         usersList.innerHTML = '';
         
@@ -350,10 +308,6 @@
             
             if (myUser && user.id === myUser.id) {
                 div.classList.add('you');
-            }
-            
-            if (drawingStates[user.id]) {
-                div.classList.add('drawing');
             }
             
             var dot = document.createElement('span');
@@ -370,35 +324,24 @@
             
             div.appendChild(dot);
             div.appendChild(name);
-            
-            if (drawingStates[user.id]) {
-                var indicator = document.createElement('span');
-                indicator.className = 'drawing-indicator';
-                indicator.title = 'Currently drawing';
-                div.appendChild(indicator);
-            }
-            
             usersList.appendChild(div);
         }
     }
-
+    
     function notify(message, type) {
         var el = document.createElement('div');
         el.className = 'notification ' + (type || 'info');
         el.textContent = message;
-        
-        notificationArea.appendChild(el);
+        notifications.appendChild(el);
         
         setTimeout(function() {
-            el.style.animation = 'fadeOut 0.3s ease forwards';
+            el.style.opacity = '0';
             setTimeout(function() {
-                if (el.parentNode) {
-                    el.parentNode.removeChild(el);
-                }
+                if (el.parentNode) el.parentNode.removeChild(el);
             }, 300);
         }, 3000);
     }
-
+    
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
