@@ -4,7 +4,6 @@ A multi-user drawing application where multiple people can draw simultaneously o
 
 ![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)
 ![Socket.IO](https://img.shields.io/badge/Socket.IO-4.7-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## Overview
 
